@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Employer / Organization
+// ---------------------------------------------------------------------------
+model Organization {
+  id               String         @id @default(cuid())
+  name             String
+  stellarPublicKey String         @unique
+  apiKeyHash       String
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  payrollBatches   PayrollBatch[]
+  employees        Employee[]
+}
+
+// ---------------------------------------------------------------------------
+// Employee
+// ---------------------------------------------------------------------------
+model Employee {
+  id               String         @id @default(cuid())
+  organizationId   String
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name             String
+  stellarAddress   String
+  email            String?
+  currency         String         @default("USD")
+  isActive         Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  payouts          Payout[]
+  payrollRuns      PayrollRunEmployee[]
+}
+
+// ---------------------------------------------------------------------------
+// Payroll batch submitted by the employer
+// ---------------------------------------------------------------------------
+model PayrollBatch {
+  id                String            @id @default(cuid())
+  organizationId    String
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  batchId           String?           @unique // on-chain batch id
+  asset             String            @default("USDC")
+  totalAmount       Decimal           @db.Decimal(24, 7)
+  status            BatchStatus       @default(PENDING) // PENDING | PROOF_GENERATED | SUBMITTED | EXECUTED | FAILED | CANCELLED
+  chainTxHash       String?
+  solvencyProof     SolvencyProof?
+  chainError        String?
+  runId             String?           // idempotency key for the Redis queue
+  createdAt         DateTime          @default(now())
+  executedAt        DateTime?
+  employees         PayrollRunEmployee[]
+  payouts           Payout[]
+}
+
+enum BatchStatus {
+  PENDING
+  PROOF_GENERATED
+  SUBMITTED
+  EXECUTED
+  FAILED
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// Per-employee line item within a batch
+// ---------------------------------------------------------------------------
+model PayrollRunEmployee {
+  id            String        @id @default(cuid())
+  batchId       String
+  batch         PayrollBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  employeeId    String
+  employee      Employee      @relation(fields: [employeeId], references: [id])
+  amount        Decimal       @db.Decimal(24, 7)
+  memo          String?
+}
+
+// ---------------------------------------------------------------------------
+// ZK proof generated off-chain for a batch
+// ---------------------------------------------------------------------------
+model SolvencyProof {
+  id                 String              @id @default(cuid())
+  batchId            String              @unique
+  batch              PayrollBatch        @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  totalDisbursed     Decimal             @db.Decimal(24, 7)
+  totalLiability     Decimal             @db.Decimal(24, 7)
+  merkleRoot         String              @db.Text
+  circuitId          Int                 @default(1)
+  vkId               String              @db.Text
+  proof              String              @db.Text // JSON-serialized proof (a, b, c)
+  publicInputs       String              @db.Text // JSON serialization
+  status             ProofStatus         @default(PENDING)
+  verifierError      String?
+  createdAt          DateTime            @default(now())
+  verifiedAt         DateTime?
+}
+
+enum ProofStatus {
+  PENDING
+  GENERATED
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+// ---------------------------------------------------------------------------
+// Individual on-chain payout records (indexed from Soroban events)
+// ---------------------------------------------------------------------------
+model Payout {
+  id             String        @id @default(cuid())
+  batchId        String        @unique
+  batch          PayrollBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  employeeId     String
+  employee       Employee      @relation(fields: [employeeId], references: [id])
+  amount         Decimal       @db.Decimal(24, 7)
+  asset          String        @default("USDC")
+  status         PayoutStatus  @default(PENDING)
+  chainTxHash    String        @unique
+  chainTimestamp BigInt        // ledger timestamp of the payout event
+  rawEvent       String        @db.Text
+  createdAt      DateTime      @default(now())
+}
+
+enum PayoutStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Incoming Soroban events collected by the indexer
+// ---------------------------------------------------------------------------
+model SorobanEvent {
+  id              String   @id @default(cuid())
+  contractId      String
+  topic           String   @db.Text
+  payload         String   @db.Text
+  txHash          String
+  ledger          BigInt
+  ledgerTimestamp BigInt
+  createdAt       DateTime @default(now())
+
+  @@index([contractId, ledger])
+  @@index([txHash])
+}
